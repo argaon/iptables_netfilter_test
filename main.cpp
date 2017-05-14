@@ -8,18 +8,30 @@
 #include <linux/netfilter.h>		/* for NF_ACCEPT */
 #include <errno.h>
 #include <string.h>
-
 #include <libnetfilter_queue/libnetfilter_queue.h>
+#include <string>
+#include <regex>
+#include <iostream>
 
 /* returns packet id */
 
-volatile int ncbs = 0;
-volatile char *bs;
-volatile int bs_len;
+/*struct nfq_filter{
+    int nfqnCbs;
+    char *nfqbs;
+};
+*/
+using namespace std;
 
-void find_block_site(unsigned char* buf, int size) {
+int ncbs = 0;
+char *bs;
+
+int find_block_site(unsigned char* buf, int size) {
     struct ip *iph;
     struct tcphdr *tcph;
+    regex re("Host: ([^\r]*)");
+    string sbuf(reinterpret_cast<char const*>(buf), size);
+    smatch m;
+//    struct AAA *aaa;
 
     int jtotd;      //'j'ump 'to' 't'cp 'd'ata pointer
     iph = (struct ip*)buf;
@@ -30,73 +42,46 @@ void find_block_site(unsigned char* buf, int size) {
         jtotd = (tcph->doff *4);
         buf += jtotd;     //jump to tcp data
         size -= jtotd;      //pkt length - jump size
-        char ctcpdata[22+bs_len];
         if(size > 0)
         {
             printf("Have TCP DATA !\n");
-            strncpy(ctcpdata, (const char *)buf, 22+bs_len);    //str copy tcpdata[0]~[21]+ URL length
-            if(strstr(ctcpdata,(const char*)bs) != NULL)        //find block site at tcpdata to ~URL
+            if((regex_search(sbuf,m,re)))
             {
-                printf("Catch block site!\n");
-                ncbs = 1;
+                cout<<m[0]<<endl;
+                if (m.str(1).compare(bs) == 0)
+                {
+                cout<<"Catch block site!"<<endl;
+                return 1;
+                }
             }
         }
         else
             printf("Have no TCP data!\n");
     }
+    return 0;
 }
+
+//static u_int32_t print_pkt (struct nfq_data *tb,struct nfq_filter *nfqf)
 static u_int32_t print_pkt (struct nfq_data *tb)
 {
+
     int id = 0;
     struct nfqnl_msg_packet_hdr *ph;
-    struct nfqnl_msg_packet_hw *hwph;
 
-    u_int32_t mark,ifi;
     int ret;
     unsigned char *data;
 
     ph = nfq_get_msg_packet_hdr(tb);
+
     if (ph) {
         id = ntohl(ph->packet_id);
-        printf("hw_protocol=0x%04x hook=%u id=%u ",
-            ntohs(ph->hw_protocol), ph->hook, id);
     }
-
-    hwph = nfq_get_packet_hw(tb);
-    if (hwph) {
-        int i, hlen = ntohs(hwph->hw_addrlen);
-
-        printf("hw_src_addr=");
-        for (i = 0; i < hlen-1; i++)
-            printf("%02x:", hwph->hw_addr[i]);
-        printf("%02x ", hwph->hw_addr[hlen-1]);
-    }
-
-    mark = nfq_get_nfmark(tb);
-    if (mark)
-        printf("mark=%u ", mark);
-
-    ifi = nfq_get_indev(tb);
-    if (ifi)
-        printf("indev=%u ", ifi);
-
-    ifi = nfq_get_outdev(tb);
-    if (ifi)
-        printf("outdev=%u ", ifi);
-    ifi = nfq_get_physindev(tb);
-    if (ifi)
-        printf("physindev=%u ", ifi);
-
-    ifi = nfq_get_physoutdev(tb);
-    if (ifi)
-        printf("physoutdev=%u ", ifi);
-
     ret = nfq_get_payload(tb, &data);
-    printf("%02x\n",data[0]);
     if (ret >= 0)
     {
-        printf("payload_len=%d \n", ret);
-        find_block_site(data,ret);
+        ncbs = find_block_site(data,ret);
+        //nfqf->nfqnCbs = find_block_site(data,ret);
+        //printf("Test Return value : %d\n",nfqf->nfqnCbs);
     }
     fputc('\n', stdout);
 
@@ -104,20 +89,17 @@ static u_int32_t print_pkt (struct nfq_data *tb)
 }
 
 static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
-          struct nfq_data *nfa, void *data)
+          struct nfq_data *nfa, void *data)    //void *data
 {
     (void)nfmsg;
     (void)data;
+
+//    struct nfq_filter *nfqf = &data;
+//    u_int32_t id = print_pkt(nfa,nfqf);
     u_int32_t id = print_pkt(nfa);
     printf("entering callback\n");
 
-    if(ncbs == 1)
-    {
-        ncbs = 0;
-        return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
-    }
-    else
-    return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    return nfq_set_verdict(qh, id, (ncbs==1)?NF_DROP:NF_ACCEPT, 0, NULL);
 }
 
 int main(int argc, char *argv[])
@@ -128,8 +110,8 @@ int main(int argc, char *argv[])
         printf("EX : 0\n");
         exit(1);
     }
+
     bs = argv[2];
-    bs_len = strlen(argv[2])+1;
 
     struct nfq_handle *h;
     struct nfq_q_handle *qh;
@@ -157,9 +139,9 @@ int main(int argc, char *argv[])
         fprintf(stderr, "error during nfq_bind_pf()\n");
         exit(1);
     }
-
     printf("binding this socket to queue '0'\n");
-    qh = nfq_create_queue(h,  0, &cb, NULL);
+    //qh = nfq_create_queue(h,  0, &cb, &aaa);
+    qh = nfq_create_queue(h, 0, &cb,0);
     if (!qh) {
         fprintf(stderr, "error during nfq_create_queue()\n");
         exit(1);
